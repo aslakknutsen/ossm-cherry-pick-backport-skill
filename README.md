@@ -130,6 +130,67 @@ ossm-cherry-pick-backport-skill/
     └── generate-backport-hints.sh        # Detects branch divergences
 ```
 
+## Contributing: improving the hints generator
+
+The hints script and the agent prompt have a deliberate division of labor:
+
+- **`generate-backport-hints.sh`** handles what can be detected cheaply with
+  static analysis (Go versions, dependency deltas, import pattern counts,
+  downstream-only files).
+- **The agent** handles everything else through reasoning — conflict resolution,
+  code adaptation, test fixes.
+
+Every time the agent spends effort *discovering* a divergence that could have
+been detected by a `git grep`, `diff`, or `go vet` invocation, that's a signal
+the hints script should be improved. The agent is burning tokens rediscovering
+something that a 50ms shell command could have told it upfront.
+
+### How to find improvement opportunities
+
+After running a backport, look at the `Backport-Change` / `Backport-Reason`
+trailers the agent wrote. Also look at the review agent's output. Ask yourself:
+
+> Could a script have predicted this change was needed *before* the cherry-pick?
+
+If yes, add a check to `scripts/generate-backport-hints.sh`.
+
+### Patterns to watch for
+
+| Agent behavior | Static check to add |
+|---|---|
+| Rewrites `slices.Contains` or other stdlib calls that don't exist on the target Go version | Compare `go` directive in both `go.mod` files, then scan the diff for stdlib packages introduced after the target version |
+| Converts imports from `pkg/foo/v2` to `pkg/foo` or vice versa | `git diff <sha> HEAD -- '*.go'` filtered to import blocks, compare import paths between trees |
+| Renames files because they moved between branches | `git diff --name-status <sha> HEAD` to detect renames/moves in the changed file set |
+| Changes struct literals because fields were added/removed | Compare struct definitions in changed files between source and target using `go doc` or AST grep |
+| Updates hardcoded version strings in test fixtures | Grep testdata/golden files for the VERSION file content or known version patterns |
+| Adjusts protobuf field names or generated code paths | Compare `.pb.go` file paths and proto package names between trees |
+| Drops or rewrites feature-gated code | Detect feature gate constants that exist in source but not in target |
+
+### Adding a new hint
+
+1. Add a check to `scripts/generate-backport-hints.sh` that writes a line to
+   `$HINTS`. Use the existing checks as examples — they all follow the pattern
+   of comparing something between `HEAD` (target branch) and `$SOURCE_SHA`.
+2. The hint line should be actionable: tell the agent *what* diverges and *what
+   to do about it*. Example:
+   ```
+   stdlib: target Go 1.21 lacks slices package (source: Go 1.23). Replace slices.Contains with a manual loop.
+   ```
+3. The backport agent reads the entire hints file before starting. More hints =
+   fewer wasted cycles, but keep each hint to one line so the file stays
+   scannable.
+
+### The feedback loop
+
+```
+run backport → read trailers/review output → spot a pattern → add hint → next backport is faster
+```
+
+Over time, the hints script gets smarter and the agent does less exploratory
+work. The goal is not to eliminate the agent — it handles genuinely novel
+situations — but to avoid making it re-derive the same mechanical
+transformations every time.
+
 ## Limitations
 
 - Max 4 parallel sub-agents per batch (platform limit in Cursor; Claude Code
