@@ -9,9 +9,9 @@ automated review. Works with Cursor and Claude Code.
 Given one or more commit SHAs and one or more target branches, the skill:
 
 1. Detects your git remotes (upstream `istio/istio`, downstream `openshift-service-mesh/istio`).
-2. Creates an isolated git worktree per (SHA, branch) pair so your working copy is untouched.
+2. Creates an isolated git worktree per **job** — either one SHA per branch (default) or **one worktree for multiple SHAs** into the same branch when you ask for **combined mode** — so your working copy is untouched.
 3. Spawns parallel sub-agents (up to 4 at a time) that each:
-   - Cherry-pick the commit into the target branch.
+   - Cherry-pick one commit, or **cherry-pick a series** preserving one commit per upstream SHA (combined mode).
    - Resolve merge conflicts preserving upstream intent.
    - Adapt code for the older branch (Go version, dependency versions, import paths, gateway-api migration).
    - Run relevant tests and fix failures.
@@ -40,7 +40,19 @@ Open the downstream repo in your agent and use agent mode. Examples:
 
 > Cherry-pick abc123def, def456abc into release-2.4, release-2.3
 
-The skill generates the cross-product: each SHA into each branch.
+Without a **combined** signal, the skill generates the **cross-product**: each SHA into each branch (four backports in that example).
+
+### Combined backport (one branch, multiple commits)
+
+Use **explicit** combined mode so the agent does not guess:
+
+- Keywords such as **together**, **as one branch**, **combined**, or **single branch**, with **one** target branch and **two or more** SHAs:
+  > Backport abc123def def456abc together into release-2.4
+
+- Or **bracket grouping** with a single branch:
+  > `[abc123def def456abc] into release-2.4`
+
+The skill creates **one** worktree and **one** topic branch with `git cherry-pick <sha1> <sha2> …` in **oldest-first** order (after verifying the SHAs form a linear series), preserving **one git commit per upstream SHA**. The hints script runs in `--combined` mode and writes `/tmp/backport-hints-<label>-<branch>`.
 
 ### With push and PR creation
 
@@ -69,8 +81,10 @@ locally, the upstream fetch is skipped.
 
 ### Git worktrees
 
-Each (SHA, branch) pair gets its own worktree at
-`/tmp/cherry-pick-<short-sha>-into-<branch>`. This means:
+Each **job** gets its own worktree at
+`/tmp/cherry-pick-<short-sha>-into-<branch>` for a single-SHA job, or
+`/tmp/cherry-pick-<label>-into-<branch>` for combined multi-SHA jobs (`<label>` is
+a short join of the SHAs or a hash prefix if the name would be too long). This means:
 
 - Your working copy stays on whatever branch you're on.
 - Multiple backports can run in parallel without interference.
@@ -80,7 +94,7 @@ Each (SHA, branch) pair gets its own worktree at
 
 Before cherry-picking, the skill runs `scripts/generate-backport-hints.sh` which
 compares the source commit's context against the target branch and writes a hints
-file. The hints cover:
+file. For combined backports, it runs `generate-backport-hints.sh --combined <label> <branch> <sha1> [sha2 ...]` and appends a section per upstream SHA. The hints cover:
 
 - **Go version** differences between source and target.
 - **Dependency deltas** for key packages (gateway-api, client-go, apimachinery).
@@ -199,6 +213,8 @@ transformations every time.
   around this by immediately creating a new branch in each worktree, but
   backporting the same SHA into the same branch twice will fail (same branch
   name collision).
+- Combined mode requires SHAs **on one ancestral line** with a clear cherry-pick
+  order; otherwise the agent must ask rather than guess.
 - Test execution depends on the target branch's test infrastructure being
   functional. If tests are broken for unrelated reasons, use the extra context
   field to tell the agent to skip them.
